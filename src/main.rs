@@ -6,29 +6,49 @@ use git2::{Repository, Error, Time, Delta, Diff};
 
 
 #[derive(Debug)]
-struct Commit {
+pub struct Commit {
     id: String,
     summary: String,
     author_name: String,
     author_email: String,
-    author_when: NaiveDate,
+    author_when: DateTime<Utc>,
 }
 
 fn convert_git_time_to_datetime(git_time: &Time) -> DateTime<Utc> {
     Utc.timestamp(git_time.seconds() + i64::from(git_time.offset_minutes()) * 60, 0)
 }
 
-pub fn walk_history(git_repo_path: &str) -> Result<(), Error> {
+pub fn walk_history(git_repo_path: &str) -> Result<Vec<Commit>, Error> {
     let repo = Repository::open(git_repo_path)?;
+    let mut vec: Vec<Commit> = Vec::new();
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
     let _ = revwalk.set_sorting(git2::Sort::TIME | git2::Sort::REVERSE);
     for rev in revwalk {
         let commit = repo.find_commit(rev?)?;
         let message = commit.summary_bytes().unwrap_or_else(|| commit.message_bytes());
-        println!("{}\t{}", commit.id(), String::from_utf8_lossy(message));
+        let authorName = match commit.author().name() {
+            None => "<none>".to_string(),
+            Some(n) => {
+                n.to_string()
+            },
+        };
+        let authorEmail = match commit.author().email() {
+            None => "<none>".to_string(),
+            Some(e) => {
+                e.to_string()
+            },
+        };
+        
+        vec.push( Commit {
+            id: commit.id().to_string(),
+            summary:  String::from_utf8_lossy(message).to_string(),
+            author_name: authorName,
+            author_email: authorEmail,
+            author_when: convert_git_time_to_datetime(&commit.time())
+        });
     }
-    Ok(())
+    return Ok(vec);
 }
 
 fn main() -> Result<()> {
@@ -48,20 +68,14 @@ fn main() -> Result<()> {
         (), // empty list of parameters.
     )?;
 
-    let date_str = "2020-04-12";
-    let naive_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
+    let commits = walk_history(".").unwrap();
 
-    let test = Commit {
-        id: "0".to_string(),
-        summary: "This is a test".to_string(),
-        author_name: "Dan Selman".to_string(),
-        author_email: "danscode@selman,org".to_string(),
-        author_when: naive_date
-    };
-    conn.execute(
-        "INSERT INTO commits (id, summary, author_name, author_email, author_when) VALUES (?1, ?2, ?3, ?4, ?5)",
-        (&test.id, &test.summary, &test.author_name, &test.author_email, &test.author_when),
-    )?;
+    for commit in commits {
+        conn.execute(
+            "INSERT INTO commits (id, summary, author_name, author_email, author_when) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (commit.id, commit.summary, commit.author_name, commit.author_email, commit.author_when),
+        )?;    
+    }
 
     let mut stmt = conn.prepare("SELECT id, summary, author_name, author_email, author_when FROM commits")?;
     let commit_iter = stmt.query_map([], |row| {
