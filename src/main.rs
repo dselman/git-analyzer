@@ -1,8 +1,8 @@
+use std::env;
+use std::{cmp::max, collections::HashMap, path::PathBuf};
+use chrono::{DateTime, Utc, TimeZone};
 use rusqlite::{Connection, Result};
-use chrono::naive::NaiveDate;
-use chrono::{DateTime, Utc, Datelike};
-use chrono::offset::TimeZone;
-use git2::{Repository, Error, Time, Delta, Diff};
+use git2::{Repository, Error, Time};
 
 
 #[derive(Debug)]
@@ -27,24 +27,39 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<Commit>, Error> {
     for rev in revwalk {
         let commit = repo.find_commit(rev?)?;
         let message = commit.summary_bytes().unwrap_or_else(|| commit.message_bytes());
-        let authorName = match commit.author().name() {
+        let author_name = match commit.author().name() {
             None => "<none>".to_string(),
             Some(n) => {
                 n.to_string()
             },
         };
-        let authorEmail = match commit.author().email() {
+        let author_email = match commit.author().email() {
             None => "<none>".to_string(),
             Some(e) => {
                 e.to_string()
             },
         };
+
+        // Ignore merge commits (2+ parents) because that's what 'git whatchanged' does.
+        // Ignore commit with 0 parents (initial commit) because there's nothing to diff against
+        if commit.parent_count() == 1 {
+            let prev_commit = commit.parent(0)?;
+            let tree = commit.tree()?;
+            let prev_tree = prev_commit.tree()?;
+            let diff= repo.diff_tree_to_tree(Some(&prev_tree), Some(&tree), None)?;
+            for delta in diff.deltas() {
+                let file_path = delta.new_file().path().unwrap();
+                let file_mod_time = commit.time();
+                let unix_time = file_mod_time.seconds();
+                println!("File path {:?} Time: {:?} Status {:?} New file: {:?} Old file: {:?}", file_path, unix_time, delta.status(), delta.new_file(), delta.old_file());
+            }
+        }
         
         vec.push( Commit {
             id: commit.id().to_string(),
             summary:  String::from_utf8_lossy(message).to_string(),
-            author_name: authorName,
-            author_email: authorEmail,
+            author_name: author_name,
+            author_email: author_email,
             author_when: convert_git_time_to_datetime(&commit.time())
         });
     }
@@ -53,7 +68,9 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<Commit>, Error> {
 
 fn main() -> Result<()> {
 
-    let _ = walk_history(".");
+    let args: Vec<String> = env::args().collect();
+    let repo_path = &args[1];
+    println!("Analyzing Git repository at {:?}", repo_path);
 
     let conn = Connection::open_in_memory()?;
 
@@ -68,7 +85,17 @@ fn main() -> Result<()> {
         (), // empty list of parameters.
     )?;
 
-    let commits = walk_history(".").unwrap();
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS commit_files (
+            id    TEXT UNIQUE,
+            name  TEXT,
+            added INT,
+            deleted INT
+            );",
+        (), // empty list of parameters.
+    )?;
+
+    let commits = walk_history(repo_path).unwrap();
 
     for commit in commits {
         conn.execute(
