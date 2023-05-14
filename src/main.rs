@@ -9,7 +9,8 @@ use git2::{Repository, Error, Time};
 pub struct FileInfo {
     path: String,
     status: String,
-    numberstats: String,
+    added_lines: i32,
+    removed_lines: i32,
 }
 
 #[derive(Debug)]
@@ -31,7 +32,8 @@ pub struct QueryResult {
     author_when: DateTime<Utc>,
     path: String,
     status: String,
-    numberstats: String,
+    added: i32,
+    deleted: i32,
 }
 
 fn convert_git_time_to_datetime(git_time: &Time) -> DateTime<Utc> {
@@ -76,29 +78,41 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
             let prev_tree = prev_commit.tree()?;
             let diff= repo.diff_tree_to_tree(Some(&prev_tree), Some(&tree), None)?;
             let numberstats = get_numberstats(&diff).unwrap_or_else(|_| "<none>".to_string());
-            for delta in diff.deltas() {
-                let file_path = delta.new_file().path().unwrap();
-                // let file_mod_time = commit.time();
-                let status_string = match delta.status() {
-                    git2::Delta::Added => "Added".to_string(),
-                    git2::Delta::Unmodified => "Unmodified".to_string(),
-                    git2::Delta::Deleted => "Deleted".to_string(),
-                    git2::Delta::Modified => "Modified".to_string(),
-                    git2::Delta::Copied => "Copied".to_string(),
-                    git2::Delta::Ignored => "Ignored".to_string(),
-                    git2::Delta::Untracked => "Untracked".to_string(),
-                    git2::Delta::Typechange => "Typechange".to_string(),
-                    git2::Delta::Unreadable => "Unreadable".to_string(),
-                    git2::Delta::Conflicted => "Conflicted".to_string(),
-                    git2::Delta::Renamed => "Renamed".to_string(),
-                };
+            print!("{}", numberstats);
 
+            let lines = numberstats.trim().split("\n");
+            for line in lines {
+                let parts = line.split("      ");
+                let mut it = parts.into_iter();
+                let added = it.next().unwrap_or_default().trim().parse::<i32>().unwrap_or_default();
+                let removed = it.next().unwrap_or_default().trim().parse::<i32>().unwrap_or_default();
+                let path = it.next().unwrap_or_default().trim();
+            
                 files.push( FileInfo {
-                    path: file_path.to_string_lossy().to_string(),
-                    status: status_string,
-                    numberstats: get_numberstats(&diff).unwrap_or_else(|_| "<none>".to_string())
+                    path: path.to_string(),
+                    status: "TODO".to_string(),
+                    added_lines: added,
+                    removed_lines: removed
                 });
             }
+
+            // for delta in diff.deltas() {
+            //     let file_path = delta.new_file().path().unwrap();
+            //     // let file_mod_time = commit.time();
+            //     let status_string = match delta.status() {
+            //         git2::Delta::Added => "Added".to_string(),
+            //         git2::Delta::Unmodified => "Unmodified".to_string(),
+            //         git2::Delta::Deleted => "Deleted".to_string(),
+            //         git2::Delta::Modified => "Modified".to_string(),
+            //         git2::Delta::Copied => "Copied".to_string(),
+            //         git2::Delta::Ignored => "Ignored".to_string(),
+            //         git2::Delta::Untracked => "Untracked".to_string(),
+            //         git2::Delta::Typechange => "Typechange".to_string(),
+            //         git2::Delta::Unreadable => "Unreadable".to_string(),
+            //         git2::Delta::Conflicted => "Conflicted".to_string(),
+            //         git2::Delta::Renamed => "Renamed".to_string(),
+            //     };
+            // }
         }
         
         vec.push( GitLogEntry {
@@ -154,12 +168,12 @@ fn main() -> Result<()> {
         for file in commit.files {
             conn.execute(
                 "INSERT INTO commit_files (id, name, status, added, deleted) VALUES (?1, ?2, ?3, ?4, ?5)",
-                (s_slice, file.path, file.status, file.numberstats, "0"),
+                (s_slice, file.path, file.status, file.added_lines, file.removed_lines),
             )?;    
         }
     }
 
-    let mut stmt = conn.prepare("SELECT commits.id, commits.summary, commits.author_name, commits.author_email, commits.author_when, commit_files.name, commit_files.status, commit_files.added FROM commits INNER JOIN commit_files ON commits.id=commit_files.id")?;
+    let mut stmt = conn.prepare("SELECT commits.id, commits.summary, commits.author_name, commits.author_email, commits.author_when, commit_files.name, commit_files.status, commit_files.added, commit_files.deleted FROM commits INNER JOIN commit_files ON commits.id=commit_files.id")?;
     let commit_iter = stmt.query_map([], |row| {
         Ok(QueryResult {
             id: row.get(0)?,
@@ -169,7 +183,8 @@ fn main() -> Result<()> {
             author_when: row.get(4)?,
             path: row.get(5)?,
             status: row.get(6)?,
-            numberstats: row.get(7)?,
+            added: row.get(7)?,
+            deleted: row.get(8)?,
         })
     })?;
 
