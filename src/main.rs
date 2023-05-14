@@ -1,26 +1,53 @@
 use std::env;
-use std::{cmp::max, collections::HashMap, path::PathBuf};
+use std::fmt::Debug;
+
 use chrono::{DateTime, Utc, TimeZone};
 use rusqlite::{Connection, Result};
 use git2::{Repository, Error, Time};
 
+#[derive(Debug)]
+pub struct FileInfo {
+    path: String,
+    status: String,
+    numberstats: String,
+}
 
 #[derive(Debug)]
-pub struct Commit {
+pub struct GitLogEntry {
     id: String,
     summary: String,
     author_name: String,
     author_email: String,
     author_when: DateTime<Utc>,
+    files: Vec<FileInfo>
+}
+
+#[derive(Debug)]
+pub struct QueryResult {
+    id: String,
+    summary: String,
+    author_name: String,
+    author_email: String,
+    author_when: DateTime<Utc>,
+    path: String,
+    status: String,
+    numberstats: String,
 }
 
 fn convert_git_time_to_datetime(git_time: &Time) -> DateTime<Utc> {
     Utc.timestamp(git_time.seconds() + i64::from(git_time.offset_minutes()) * 60, 0)
 }
 
-pub fn walk_history(git_repo_path: &str) -> Result<Vec<Commit>, Error> {
+fn get_numberstats(diff: &git2::Diff) -> Result<String, Error> {
+    let stats = diff.stats()?;
+    let format = git2::DiffStatsFormat::NUMBER;
+    let buf = stats.to_buf(format, 80)?;
+    return Ok(std::str::from_utf8(&*buf).unwrap().to_string());
+}
+
+pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
     let repo = Repository::open(git_repo_path)?;
-    let mut vec: Vec<Commit> = Vec::new();
+    let mut vec: Vec<GitLogEntry> = Vec::new();
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
     let _ = revwalk.set_sorting(git2::Sort::TIME | git2::Sort::REVERSE);
@@ -42,25 +69,45 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<Commit>, Error> {
 
         // Ignore merge commits (2+ parents) because that's what 'git whatchanged' does.
         // Ignore commit with 0 parents (initial commit) because there's nothing to diff against
+        let mut files: Vec<FileInfo> = Vec::new();
         if commit.parent_count() == 1 {
             let prev_commit = commit.parent(0)?;
             let tree = commit.tree()?;
             let prev_tree = prev_commit.tree()?;
             let diff= repo.diff_tree_to_tree(Some(&prev_tree), Some(&tree), None)?;
+            let numberstats = get_numberstats(&diff).unwrap_or_else(|_| "<none>".to_string());
             for delta in diff.deltas() {
                 let file_path = delta.new_file().path().unwrap();
-                let file_mod_time = commit.time();
-                let unix_time = file_mod_time.seconds();
-                println!("File path {:?} Time: {:?} Status {:?} New file: {:?} Old file: {:?}", file_path, unix_time, delta.status(), delta.new_file(), delta.old_file());
+                // let file_mod_time = commit.time();
+                let status_string = match delta.status() {
+                    git2::Delta::Added => "Added".to_string(),
+                    git2::Delta::Unmodified => "Unmodified".to_string(),
+                    git2::Delta::Deleted => "Deleted".to_string(),
+                    git2::Delta::Modified => "Modified".to_string(),
+                    git2::Delta::Copied => "Copied".to_string(),
+                    git2::Delta::Ignored => "Ignored".to_string(),
+                    git2::Delta::Untracked => "Untracked".to_string(),
+                    git2::Delta::Typechange => "Typechange".to_string(),
+                    git2::Delta::Unreadable => "Unreadable".to_string(),
+                    git2::Delta::Conflicted => "Conflicted".to_string(),
+                    git2::Delta::Renamed => "Renamed".to_string(),
+                };
+
+                files.push( FileInfo {
+                    path: file_path.to_string_lossy().to_string(),
+                    status: status_string,
+                    numberstats: get_numberstats(&diff).unwrap_or_else(|_| "<none>".to_string())
+                });
             }
         }
         
-        vec.push( Commit {
+        vec.push( GitLogEntry {
             id: commit.id().to_string(),
             summary:  String::from_utf8_lossy(message).to_string(),
             author_name: author_name,
             author_email: author_email,
-            author_when: convert_git_time_to_datetime(&commit.time())
+            author_when: convert_git_time_to_datetime(&commit.time()),
+            files,
         });
     }
     return Ok(vec);
@@ -87,8 +134,9 @@ fn main() -> Result<()> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS commit_files (
-            id    TEXT UNIQUE,
+            id    TEXT,
             name  TEXT,
+            status  TEXT,
             added INT,
             deleted INT
             );",
@@ -98,20 +146,30 @@ fn main() -> Result<()> {
     let commits = walk_history(repo_path).unwrap();
 
     for commit in commits {
+        let s_slice: &str = &commit.id[..];
         conn.execute(
             "INSERT INTO commits (id, summary, author_name, author_email, author_when) VALUES (?1, ?2, ?3, ?4, ?5)",
-            (commit.id, commit.summary, commit.author_name, commit.author_email, commit.author_when),
-        )?;    
+            (s_slice, commit.summary, commit.author_name, commit.author_email, commit.author_when),
+        )?;
+        for file in commit.files {
+            conn.execute(
+                "INSERT INTO commit_files (id, name, status, added, deleted) VALUES (?1, ?2, ?3, ?4, ?5)",
+                (s_slice, file.path, file.status, file.numberstats, "0"),
+            )?;    
+        }
     }
 
-    let mut stmt = conn.prepare("SELECT id, summary, author_name, author_email, author_when FROM commits")?;
+    let mut stmt = conn.prepare("SELECT commits.id, commits.summary, commits.author_name, commits.author_email, commits.author_when, commit_files.name, commit_files.status, commit_files.added FROM commits INNER JOIN commit_files ON commits.id=commit_files.id")?;
     let commit_iter = stmt.query_map([], |row| {
-        Ok(Commit {
+        Ok(QueryResult {
             id: row.get(0)?,
             summary: row.get(1)?,
             author_name: row.get(2)?,
             author_email: row.get(3)?,
-            author_when: row.get(4)?
+            author_when: row.get(4)?,
+            path: row.get(5)?,
+            status: row.get(6)?,
+            numberstats: row.get(7)?,
         })
     })?;
 
