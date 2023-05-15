@@ -34,8 +34,8 @@ pub struct QueryResult {
     author_when: DateTime<Utc>,
     path: String,
     status: String,
-    added: i32,
-    deleted: i32,
+    added: Option<i32>,
+    deleted: Option<i32>,
 }
 
 fn convert_git_time_to_datetime(git_time: &Time) -> DateTime<Utc> {
@@ -47,7 +47,7 @@ fn convert_git_time_to_datetime(git_time: &Time) -> DateTime<Utc> {
 
 fn process_numberstats(
     diff: &git2::Diff,
-    files_map: HashMap<String, FileInfo>,
+    files_map: &HashMap<String, FileInfo>,
 ) -> Result<HashMap<String, FileInfo>, Error> {
     let mut result: HashMap<String, FileInfo> = HashMap::new();
 
@@ -62,29 +62,33 @@ fn process_numberstats(
     let lines = numberstats.trim().split("\n");
 
     for line in lines {
-        let caps = re.captures(line).unwrap();
-        let added = caps.get(1).map_or("", |m| m.as_str());
-        let removed = caps.get(2).map_or("", |m| m.as_str());
-        let path = caps.get(3).map_or("", |m| m.as_str());
+        let captures = re.captures(line);
 
-        let file_info = files_map.get(path);
-        match file_info {
-            Some(fi) => {
-                result.insert(
-                    path.to_string(),
-                    FileInfo {
-                        path: fi.path.to_string(),
-                        status: fi.status.to_string(),
-                        added_lines: Some(parse_int(added)),
-                        removed_lines: Some(parse_int(removed)),
-                    },
-                );
+        match captures {
+            Some(caps) => {
+                let added = caps.get(1).map_or("", |m| m.as_str());
+                let removed = caps.get(2).map_or("", |m| m.as_str());
+                let path = caps.get(3).map_or("", |m| m.as_str());
+
+                let file_info = files_map.get(path);
+                match file_info {
+                    Some(fi) => {
+                        result.insert(
+                            path.to_string(),
+                            FileInfo {
+                                path: fi.path.to_string(),
+                                status: fi.status.to_string(),
+                                added_lines: Some(parse_int(added)),
+                                removed_lines: Some(parse_int(removed)),
+                            },
+                        );
+                    }
+                    None => {
+                    }
+                }
             }
             None => {
-                println!("Failed to find path: {:?}", path);
-                println!("{:?}", numberstats);
-                println!("Current map: {:?}", files_map);
-            }
+            },
         }
     }
     Ok(result)
@@ -137,7 +141,6 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
         // Ignore merge commits (2+ parents) because that's what 'git whatchanged' does.
         // Ignore commit with 0 parents (initial commit) because there's nothing to diff against
         let mut files_map: HashMap<String, FileInfo> = HashMap::new();
-        let mut new_files_map: HashMap<String, FileInfo> = HashMap::new();
 
         if commit.parent_count() == 1 {
             let prev_commit = commit.parent(0)?;
@@ -160,7 +163,15 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
                     },
                 );
             }
-            new_files_map = process_numberstats(&diff, files_map).unwrap();
+            let new_files_map = process_numberstats(&diff, &files_map).unwrap();
+            for f in new_files_map.values() {
+                files_map.insert( f.path.to_string(), FileInfo {
+                    path: f.path.to_string(),
+                    status: f.status.to_string(),
+                    added_lines: f.added_lines,
+                    removed_lines: f.removed_lines,
+                });
+            }
         }
         vec.push(GitLogEntry {
             id: commit.id().to_string(),
@@ -168,7 +179,7 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
             author_name: author_name,
             author_email: author_email,
             author_when: convert_git_time_to_datetime(&commit.time()),
-            files: Vec::from_iter(new_files_map.values().map(|f| FileInfo {
+            files: Vec::from_iter(files_map.values().map(|f| FileInfo {
                 path: f.path.clone(),
                 status: f.status.clone(),
                 added_lines: f.added_lines,
