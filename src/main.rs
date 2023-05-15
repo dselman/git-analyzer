@@ -196,7 +196,8 @@ fn main() -> Result<()> {
     let repo_path = &args[1];
     println!("Analyzing Git repository at {:?}", repo_path);
 
-    let conn = Connection::open_in_memory()?;
+    // let conn = Connection::open_in_memory()?;
+    let conn = Connection::open("./db.db3")?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS commits (
