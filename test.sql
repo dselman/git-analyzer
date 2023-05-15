@@ -57,6 +57,18 @@ WHERE cf.name IN (
     HAVING COUNT(DISTINCT c.author_name) = 1
 );
 
+-- Files modified by many authors
+SELECT DISTINCT cf.name, c.author_name
+FROM commit_files cf
+INNER JOIN commits c ON cf.id = c.id
+WHERE cf.name IN (
+    SELECT cf.name
+    FROM commit_files cf
+    INNER JOIN commits c ON cf.id = c.id
+    GROUP BY cf.name
+    HAVING COUNT(DISTINCT c.author_name) > 5
+);
+
 
 
 -- Authorship of a file
