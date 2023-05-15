@@ -9,3 +9,4 @@ edition = "2021"
 rusqlite = { version = "0.29.0", features = ["chrono"] }
 chrono = "0.4.24"
 git2 = "0.17.1"
+regex = "1.8.1"

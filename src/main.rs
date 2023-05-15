@@ -5,6 +5,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use git2::{Error, Repository, Time};
 use rusqlite::{Connection, Result};
 
+use regex::Regex;
+
 #[derive(Debug)]
 pub struct FileInfo {
     path: String,
@@ -49,6 +51,8 @@ fn process_numberstats(
 ) -> Result<HashMap<String, FileInfo>, Error> {
     let mut result: HashMap<String, FileInfo> = HashMap::new();
 
+    let re = Regex::new(r"^(\d+)[ ]+(\d+)[ ]+(\S+)$").unwrap();
+
     let stats = diff.stats()?;
     let format = git2::DiffStatsFormat::NUMBER;
     let buf = stats.to_buf(format, 80)?;
@@ -58,22 +62,29 @@ fn process_numberstats(
     let lines = numberstats.trim().split("\n");
 
     for line in lines {
-        let parts = line.split("      ");
-        let mut it = parts.into_iter();
-        let added = parse_int(it.next().unwrap_or_default().trim());
-        let removed = parse_int(it.next().unwrap_or_default().trim());
-        let path = it.next().unwrap_or_default().trim();
+        let caps = re.captures(line).unwrap();
+        let added = caps.get(1).map_or("", |m| m.as_str());
+        let removed = caps.get(2).map_or("", |m| m.as_str());
+        let path = caps.get(3).map_or("", |m| m.as_str());
+
         let file_info = files_map.get(path);
         match file_info {
             Some(fi) => {
-                result.insert( path.to_string(), FileInfo {
-                    path: fi.path.to_string(),
-                    status: fi.status.to_string(),
-                    added_lines: Some(added),
-                    removed_lines: Some(removed)
-                });
+                result.insert(
+                    path.to_string(),
+                    FileInfo {
+                        path: fi.path.to_string(),
+                        status: fi.status.to_string(),
+                        added_lines: Some(parse_int(added)),
+                        removed_lines: Some(parse_int(removed)),
+                    },
+                );
             }
-            None => {}
+            None => {
+                println!("Failed to find path: {:?}", path);
+                println!("{:?}", numberstats);
+                println!("Current map: {:?}", files_map);
+            }
         }
     }
     Ok(result)
@@ -126,6 +137,7 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
         // Ignore merge commits (2+ parents) because that's what 'git whatchanged' does.
         // Ignore commit with 0 parents (initial commit) because there's nothing to diff against
         let mut files_map: HashMap<String, FileInfo> = HashMap::new();
+        let mut new_files_map: HashMap<String, FileInfo> = HashMap::new();
 
         if commit.parent_count() == 1 {
             let prev_commit = commit.parent(0)?;
@@ -138,14 +150,17 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
                 let s_slice: &str = &file_path[..];
                 let status_string = get_diff_delta_status(delta);
 
-                files_map.insert(s_slice.to_string(), FileInfo {
-                    status: status_string.to_string(),
-                    path: s_slice.to_string(),
-                    added_lines: None,
-                    removed_lines: None,
-                });
+                files_map.insert(
+                    s_slice.to_string(),
+                    FileInfo {
+                        status: status_string.to_string(),
+                        path: s_slice.to_string(),
+                        added_lines: None,
+                        removed_lines: None,
+                    },
+                );
             }
-            files_map = process_numberstats(&diff, files_map).unwrap();
+            new_files_map = process_numberstats(&diff, files_map).unwrap();
         }
         vec.push(GitLogEntry {
             id: commit.id().to_string(),
@@ -153,7 +168,7 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
             author_name: author_name,
             author_email: author_email,
             author_when: convert_git_time_to_datetime(&commit.time()),
-            files: Vec::from_iter(files_map.values().map(|f| FileInfo {
+            files: Vec::from_iter(new_files_map.values().map(|f| FileInfo {
                 path: f.path.clone(),
                 status: f.status.clone(),
                 added_lines: f.added_lines,
@@ -227,16 +242,18 @@ fn main() -> Result<()> {
 
     for commit in commit_iter {
         let c = commit.unwrap();
-        println!("{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}", 
-            c.id, 
+        println!(
+            "{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+            c.id,
             c.author_when,
             c.author_name,
             c.author_email,
-            c.path, 
+            c.path,
             c.status,
-            c.added, 
+            c.added,
             c.deleted,
-            c.summary);
+            c.summary
+        );
     }
     Ok(())
 }
