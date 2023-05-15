@@ -61,7 +61,6 @@ WHERE cf.name IN (
 
 -- Authorship of a file
 -- Let's look at who "knows" about a file based upon how much they've authored it. 
--- I'm going to pick on handler/helpers.go since that seems to be an exciting hotspot.
 select name, author_name, count(commits.id) as commits, date(max(author_when)) as last_touched
 from commits, commit_files 
 where commits.id = commit_files.id
