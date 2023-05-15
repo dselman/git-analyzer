@@ -1,16 +1,16 @@
-use std::env;
 use std::fmt::Debug;
+use std::{collections::HashMap, env};
 
-use chrono::{DateTime, Utc, TimeZone};
+use chrono::{DateTime, TimeZone, Utc};
+use git2::{Error, Repository, Time};
 use rusqlite::{Connection, Result};
-use git2::{Repository, Error, Time};
 
 #[derive(Debug)]
 pub struct FileInfo {
     path: String,
     status: String,
-    added_lines: i32,
-    removed_lines: i32,
+    added_lines: Option<i32>,
+    removed_lines: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -20,7 +20,7 @@ pub struct GitLogEntry {
     author_name: String,
     author_email: String,
     author_when: DateTime<Utc>,
-    files: Vec<FileInfo>
+    files: Vec<FileInfo>,
 }
 
 #[derive(Debug)]
@@ -37,14 +37,70 @@ pub struct QueryResult {
 }
 
 fn convert_git_time_to_datetime(git_time: &Time) -> DateTime<Utc> {
-    Utc.timestamp(git_time.seconds() + i64::from(git_time.offset_minutes()) * 60, 0)
+    Utc.timestamp(
+        git_time.seconds() + i64::from(git_time.offset_minutes()) * 60,
+        0,
+    )
 }
 
-fn get_numberstats(diff: &git2::Diff) -> Result<String, Error> {
+fn process_numberstats(
+    diff: &git2::Diff,
+    files_map: HashMap<String, FileInfo>,
+) -> Result<HashMap<String, FileInfo>, Error> {
+    let mut result: HashMap<String, FileInfo> = HashMap::new();
+
     let stats = diff.stats()?;
     let format = git2::DiffStatsFormat::NUMBER;
     let buf = stats.to_buf(format, 80)?;
-    return Ok(std::str::from_utf8(&*buf).unwrap().to_string());
+    let numberstats = std::str::from_utf8(&*buf)
+        .unwrap_or_else(|_| "")
+        .to_string();
+    let lines = numberstats.trim().split("\n");
+
+    for line in lines {
+        let parts = line.split("      ");
+        let mut it = parts.into_iter();
+        let added = parse_int(it.next().unwrap_or_default().trim());
+        let removed = parse_int(it.next().unwrap_or_default().trim());
+        let path = it.next().unwrap_or_default().trim();
+        let file_info = files_map.get(path);
+        match file_info {
+            Some(fi) => {
+                result.insert( path.to_string(), FileInfo {
+                    path: fi.path.to_string(),
+                    status: fi.status.to_string(),
+                    added_lines: Some(added),
+                    removed_lines: Some(removed)
+                });
+            }
+            None => {}
+        }
+    }
+    Ok(result)
+}
+
+fn parse_int(input: &str) -> i32 {
+    match input.parse() {
+        Ok(number) => number,
+        Err(_) => -1,
+    }
+}
+
+fn get_diff_delta_status(delta: git2::DiffDelta) -> &str {
+    let status_string: &str = match delta.status() {
+        git2::Delta::Added => "Added",
+        git2::Delta::Unmodified => "Unmodified",
+        git2::Delta::Deleted => "Deleted",
+        git2::Delta::Modified => "Modified",
+        git2::Delta::Copied => "Copied",
+        git2::Delta::Ignored => "Ignored",
+        git2::Delta::Untracked => "Untracked",
+        git2::Delta::Typechange => "Typechange",
+        git2::Delta::Unreadable => "Unreadable",
+        git2::Delta::Conflicted => "Conflicted",
+        git2::Delta::Renamed => "Renamed",
+    };
+    status_string
 }
 
 pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
@@ -55,80 +111,61 @@ pub fn walk_history(git_repo_path: &str) -> Result<Vec<GitLogEntry>, Error> {
     let _ = revwalk.set_sorting(git2::Sort::TIME | git2::Sort::REVERSE);
     for rev in revwalk {
         let commit = repo.find_commit(rev?)?;
-        let message = commit.summary_bytes().unwrap_or_else(|| commit.message_bytes());
+        let message = commit
+            .summary_bytes()
+            .unwrap_or_else(|| commit.message_bytes());
         let author_name = match commit.author().name() {
             None => "<none>".to_string(),
-            Some(n) => {
-                n.to_string()
-            },
+            Some(n) => n.to_string(),
         };
         let author_email = match commit.author().email() {
             None => "<none>".to_string(),
-            Some(e) => {
-                e.to_string()
-            },
+            Some(e) => e.to_string(),
         };
 
         // Ignore merge commits (2+ parents) because that's what 'git whatchanged' does.
         // Ignore commit with 0 parents (initial commit) because there's nothing to diff against
-        let mut files: Vec<FileInfo> = Vec::new();
+        let mut files_map: HashMap<String, FileInfo> = HashMap::new();
+
         if commit.parent_count() == 1 {
             let prev_commit = commit.parent(0)?;
             let tree = commit.tree()?;
             let prev_tree = prev_commit.tree()?;
-            let diff= repo.diff_tree_to_tree(Some(&prev_tree), Some(&tree), None)?;
-            let numberstats = get_numberstats(&diff).unwrap_or_else(|_| "<none>".to_string());
-            print!("{}", numberstats);
+            let diff = repo.diff_tree_to_tree(Some(&prev_tree), Some(&tree), None)?;
 
-            let lines = numberstats.trim().split("\n");
-            for line in lines {
-                let parts = line.split("      ");
-                let mut it = parts.into_iter();
-                let added = it.next().unwrap_or_default().trim().parse::<i32>().unwrap_or_default();
-                let removed = it.next().unwrap_or_default().trim().parse::<i32>().unwrap_or_default();
-                let path = it.next().unwrap_or_default().trim();
-            
-                files.push( FileInfo {
-                    path: path.to_string(),
-                    status: "TODO".to_string(),
-                    added_lines: added,
-                    removed_lines: removed
+            for delta in diff.deltas() {
+                let file_path = String::from(delta.new_file().path().unwrap().to_string_lossy());
+                let s_slice: &str = &file_path[..];
+                let status_string = get_diff_delta_status(delta);
+
+                files_map.insert(s_slice.to_string(), FileInfo {
+                    status: status_string.to_string(),
+                    path: s_slice.to_string(),
+                    added_lines: None,
+                    removed_lines: None,
                 });
             }
-
-            // for delta in diff.deltas() {
-            //     let file_path = delta.new_file().path().unwrap();
-            //     // let file_mod_time = commit.time();
-            //     let status_string = match delta.status() {
-            //         git2::Delta::Added => "Added".to_string(),
-            //         git2::Delta::Unmodified => "Unmodified".to_string(),
-            //         git2::Delta::Deleted => "Deleted".to_string(),
-            //         git2::Delta::Modified => "Modified".to_string(),
-            //         git2::Delta::Copied => "Copied".to_string(),
-            //         git2::Delta::Ignored => "Ignored".to_string(),
-            //         git2::Delta::Untracked => "Untracked".to_string(),
-            //         git2::Delta::Typechange => "Typechange".to_string(),
-            //         git2::Delta::Unreadable => "Unreadable".to_string(),
-            //         git2::Delta::Conflicted => "Conflicted".to_string(),
-            //         git2::Delta::Renamed => "Renamed".to_string(),
-            //     };
-            // }
+            files_map = process_numberstats(&diff, files_map).unwrap();
         }
-        
-        vec.push( GitLogEntry {
+        vec.push(GitLogEntry {
             id: commit.id().to_string(),
-            summary:  String::from_utf8_lossy(message).to_string(),
+            summary: String::from_utf8_lossy(message).to_string(),
             author_name: author_name,
             author_email: author_email,
             author_when: convert_git_time_to_datetime(&commit.time()),
-            files,
+            files: Vec::from_iter(files_map.values().map(|f| FileInfo {
+                path: f.path.clone(),
+                status: f.status.clone(),
+                added_lines: f.added_lines,
+                removed_lines: f.removed_lines,
+            })),
         });
     }
+
     return Ok(vec);
 }
 
 fn main() -> Result<()> {
-
     let args: Vec<String> = env::args().collect();
     let repo_path = &args[1];
     println!("Analyzing Git repository at {:?}", repo_path);
@@ -169,7 +206,7 @@ fn main() -> Result<()> {
             conn.execute(
                 "INSERT INTO commit_files (id, name, status, added, deleted) VALUES (?1, ?2, ?3, ?4, ?5)",
                 (s_slice, file.path, file.status, file.added_lines, file.removed_lines),
-            )?;    
+            )?;
         }
     }
 
@@ -189,7 +226,17 @@ fn main() -> Result<()> {
     })?;
 
     for commit in commit_iter {
-        println!("Found commit {:?}", commit.unwrap());
+        let c = commit.unwrap();
+        println!("{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}", 
+            c.id, 
+            c.author_when,
+            c.author_name,
+            c.author_email,
+            c.path, 
+            c.status,
+            c.added, 
+            c.deleted,
+            c.summary);
     }
     Ok(())
 }
